@@ -1,14 +1,15 @@
-# zookeeper相关常见面试题
+# 深入理解zookeeper
 
-## 1. 说说Zookeeper的zab协议
-### 1.1 zab协议
+## 1. Zookeeper的zab协议
+### 1.1 zab协议简述
 1. 全称：zookeeper atomic broadcast (zookeeper原子广播协议)
 2. 不是一个通用的分布式一致性算法，是一种特别为Zookeeper设计的一致性算法
 3. 一种主备模式的系统架构，使用单一的主进程来接收并处理来自客户端的所有事务，使用zab
 协议将服务器状态的变更以proposal(提议)的形势广播到所有的副本进程上去(其他的zk节点)。
 4. zab协议能够保证同一时刻只有一个主进程来广播服务器的状态变更
 5. zab协议能够保证全局的变更序列被顺序应用
-6. zab协议能够保证主进程出现崩溃或重启的情况下，能够快速选主，整个集群能够快速恢复(300ms就可以恢复)。
+6. zab协议能够保证主进程出现崩溃或重启的情况下，能够快速选主，整个集群能够快速
+恢复(300ms就可以恢复)。
 ### 1.2 zab协议介绍
 zab协议包括两部分：
     * 恢复模式
@@ -28,9 +29,10 @@ proposal后要么正常反馈ack，要么抛弃leader，只要leader收到过半
 5. 这种简化版二阶段提交无法处理leader崩溃的数据不一致问题，因此会有恢复模式
 6. 消息广播协议基于TCP，TCP具有FIFO特性，能够保证消息接收和发送的有序性
 7. proposal具有一个全局单调递增的ZXID
-8. leader会为每个follower分配一个单独队列，将提议放入队列以FIFO策略发送，follower拿到提议会把
-提议写入磁盘，然后返回ack。leader拿到过半的ack之后就会广播commit消息给所有的follower，
-follower收到commit也会提交自身事务。
+8. leader会为每个follower分配一个单独队列，将提议放入队列以FIFO策略发送，
+follower拿到提议会把提议写入磁盘，然后返回ack。
+leader拿到过半的ack之后就会广播commit消息给所有的follower，follower收到
+commit也会提交自身事务。
 #### 1.2.3 数据一致性
 需要解决的2个问题
 * zab协议需要确保leader提出的commit请求要被所有的follower执行
@@ -38,7 +40,8 @@ follower收到commit也会提交自身事务。
 * 如果leader提出proposal之后就挂了，没有发出对应的commit命令，这类proposal要被丢弃
 
 关于第一个问题：
-1. **所以如果出现leader崩溃，新选举出来的leader服务器必须要拥有集群中已提交的proposal中的最大的zxid**
+1. **所以如果出现leader崩溃，新选举出来的leader服务器必须要拥有集群中
+已提交的proposal中的最大的zxid**
 2. 选出新leader之后，新leader会把未被同步的proposal发给follower进行同步，并且
 紧接着就发commit，等到follower确认后，leader会把这些同步完毕的follower添加到
 真正可用的follower列表中，并开始之后的流程。
@@ -254,18 +257,153 @@ eventThread不停的从队列取出Event，串行执行回调
 4. 网络开销和服务端的内存开销都十分廉价，很优秀的设计。
 
 #### 5.1.5 ACL 保证数据安全
-其实就是Zookeeper的密码
+其实就是Zookeeper的密码，暂时先跳过了，虽然有点用，但不是重点
 ### 5.2 序列化与协议
 #### 5.2.1 jute介绍
 #### 5.2.2 使用jute进行序列化
 #### 5.2.3 深入jute
 #### 5.2.4 通信协议
+
+
 ### 5.3 客户端
 #### 5.3.1 会话的创建过程
+##### 5.3.1.1 初始化阶段
+
+1. 初始化Zookeeper对象
+调用Zookeeper的构造方法来实例化一个Zookeeper对象，在初始化过程中，会创建一个
+ClientWatcherManager。
+
+2. 设置会话默认Watcher
+如果在构造方法中传入了一个Watcher对象，那么客户端会将这个对象作为默认的Watcher
+保存在ClientWatchManager中。
+
+3. 构造Zookeeper服务器地址列表管理器：HostProvider
+对于构造方法中传入的服务器地址，客户端会将其存放在服务器地址列表管理器HostProvider中
+4. 创建并初始化客户端网络连接器：ClientCnxn
+
+zk客户端首先会创建一个网络连接器ClientCnxn，用来管理客户端与服务器的网络交互。另外，
+客户端在创建clientCnxn的同时，还会初始化客户端两个核心队列outgoingQueue和pendingQueue
+，分别作为客户端的请求发送队列和服务端响应的等待队列。
+ClientCnxn连接器的底层i/o处理器是clientCnxnSocket，因此，在这一步，客户端还会
+同时创建ClientCnxnSocket处理器。
+5. 初始化SendThread和EventThread
+
+客户端会创建两个核心网络线程SendThread和EventThread，前者用户管理客户端和服务端之间的所有
+网络i/o，后者则用于进行客户端的时间处理。同时，客户端还会降clientCnxnSocket分配
+给SendThread作为底层网络i/o处理器，并初始化EventThread的待处理事件队列waitingEventS，
+用于存放所有等待被客户端处理的事件。
+##### 5.3.1.2 会话创建阶段
+6. 启动SendThread和EventThread
+SendThread首先会判断当前客户端的创建，进行一系列请理性工作，为客户端发送“会话创建”
+请求做准备。
+7. 获取一个服务器地址
+在开始创建TCP连接之前，SendThread首先需要获取一个ZK服务器的目标地址，这通常是从HostProvider
+中随机获取出一个地址，然后委托给ClientCnxnSocket去创建与ZK服务器之间的TCP连接。
+
+8. 创建TCP连接
+获取到一个服务器地址后，ClientCnxnSocket负责和服务器创建一个TCP长连接。
+
+9. 构造ConnectRequest请求
+
+在TCP连接创建完毕后，可能有人会觉得，这样是否就说明已经和ZK服务器完成连接了呢？
+其实并没有，步骤8只是建立了Socket连接而已，还早呢。
+
+SendThread会负责根据当前客户端的实际设置，构造出一个ConnectRequest请求，这个请求代表
+客户端试图与服务器创建一个会话。同时ZK客户端还会进一步将请求包装成网络I/o层的Packet对象，
+放入**请求发送队列outgoingQueue**中去。
+
+10. 发送请求
+当客户端请求准备完成后，就可以开始向服务器发送请求了。ClientCnxnSocket负责从outgoingQueue
+中取出一个待发送的Packet对象，将其序列化成byteBuffer后，发送至服务端。
+
+##### 5.3.1.3 响应处理阶段
+11. 接收服务端响应
+ClientCnxnSocket接收到服务端的响应后，会首先判断当前的客户端状态是否是“已初始化”，如果不是，
+就认为一定是会话创建请求的响应，直接交由readConnectResult方法来处理该响应。
+12. 处理Response
+ClientCnxnSocket会对接收到的服务端响应进行反序列化，得到ConnectRespose对象，并从中获取到
+ZK服务端分配的会话ID。(sessionID)
+13. 连接成功
+连接成功后，一方面需要通知SendThread线程，进一步对客户端进行会话参数的设置，包括ReadTimeOut
+和connectTimeOOut等，并更新客户端状态。还要通知HostProvider当前成功连接的服务器地址。
+14. 生成时间：SyncConnected-None
+为了能够让上层应用感知到会话的成功创建，SendThread会生成一个事件，代表客户端与服务器会话
+创建成功，并将时间给EventThread线程。
+
+15. 查询Watcher
+EventThread线程收到事件后，会从ClientWatchManager管理器中查询出对应的Watcher，针对这个
+事件，直接找出步骤2中的默认Watcher，然后将其放到EventThread的waitingEvents队列中。
+
+16. 处理事件
+EventThread不断地从waitingEvents队列中取出待处理的Watcher对象，然后直接调用该对象的process接口
+方法，触发Watcher。
+
 #### 5.3.2 服务器地址列表
+##### 5.3.2.1 connectString
+192.168.10.1:2181,192.168.10.2:2181,192.168.10.3:2181
+逗号分隔就完事儿了，用过ZK的都知道，不多说
+##### 5.3.2.2 Chroot
+3.2以后的版本新加的
+192.168.10.1:2181,192.168.10.2:2181,192.168.10.3:2181/service/
+如果地址是上面那么配置的，那么创建的所有节点都会在service之下
+##### 5.3.2.3 HostProvider
+默认实现是StaticHostProvider，你肯定会纳闷，配了这么多的地址，
+到底选择哪个地址去连接呢？
+内部机制是这样的，如果你配了5个地址，经过一轮随机打乱后，顺序就变了，然后这个5地址
+组成一个循环队列，然后就循环的访问这几个地址，类似round-robin的轮询策略。
+>这个HostProvider也可以自己实现，增加一些特性，例如连接地址同机房优先，或者地址可以
+动态变化等等。
 #### 5.3.3 ClientCnxn:网络IO
+ClientCnxn是zk客户端的核心工作类，负责维护客户端和服务端之间的网络连接并进行一系列网络通信。
+##### 5.3.3.1 Packet
+packet是对协议层的封装，作为ZK中请求与响应的载体。数据结构如下：
+
+1. requestHeader
+2. replyHeader
+3. request
+4. response
+5. bb:byteBuffer
+6. clientPath
+7. serverPath
+8. finished
+9. cb:AsyncCallBack
+10. ctx:Object
+11. watchRegistration
+12. readOnly
+
+packet只会讲requestHeader,request,readOnly这三个属性进行序列化，然后进行网络传输
+，其他的属性不会传输。
+
+##### 5.3.3.2 outgoingQueue 和 pendingQueue
+* outgoingQueue:需要发送到服务端的Packet集合
+* pendingQueue：存储已经发到客户端，但是需要等待服务端响应的Packet集合
+
+##### 5.3.3.3 ClientCnxnSocket: 底层Socket通信层
+定义了底层Socket通信的接口，3.4版本以后可以使用系统变量配置实现类的全类名，例如
+`-Dzookeeper.clientCnxnSocket=org.apache.zookeeper.ClientCnxnSocketNIO`。
+发送流程没什么可说的，就是从outgoingQueue中取出数据然后发送。
+响应接收，判断当前客户端如果尚未初始化，说明当前正在进行会话创建，直接将接收到的ByteBuffer
+序列化成ConnectResponse对象；如果处于正常会话期，并且收到的是一个事件，会将ByteBuffer
+序列化成WatcherEvent对象；如果是一个常规的请求响应，就序列化成相应的Response对象。
+##### 5.3.3.4 SendThread
+SendThread管理客户端和服务端之间的所有网络i/o操作。
+还维护了客户端与服务端之间的会话生命周期，一定周期频率内向服务端发送一个ping包。
+如果客户端与服务端出现TCP连接断开，会自动重连。
+将上层的API操作转换成相应的请求协议发送到服务端，完成对同步调用的返回和异步调用的回调。
+同时，还负责将事件传递给EventThread去处理。
+##### 5.3.3.5 EventThread
+事件处理，触发客户端注册的Watcher监听，处理一些异步回调。
+
+##### 5.3.3.3 Client
+
 ### 5.4 会话
 #### 5.4.1 会话状态
+* CONNECTING 开始创建Zookeeper对象
+* CONNECTED 连上服务器了
+* RECONNECTING 闪断 
+* RECONNECTED 又连上服务器了
+* CLOSE 会话超时，权限检查失败
+
 #### 5.4.2 会话创建
 #### 5.4.3 会话管理
 #### 5.4.4 会话清理
