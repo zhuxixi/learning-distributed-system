@@ -510,10 +510,80 @@ per.connection 设为 1，这样在生产者尝试发送第一批消息时，就
    
  ** 使用自定义的分区器，判断当前消息是否是争抢型，如果是总是将其存到第一个partition。
    如果不是，只要根据key散列一个partition即可 **。
+
 ## 8 消费者
+### 8.1 消费者消费者群组
+1. 单线程消费肯定不够的，所以有消费者群组这个概念。
+2. 假如一个topic有24个partition，
+可以设置一个消费者群组group1，包含24个消费者，每个消费者消费一个partition。
+然后再搞一个group2，包含10个消费者，对数据做一些日志记录。
 
+3. 同一个topic，可以有多个group消费，多个group之间消费进度互不干涉。
+4. 如果消费者数量小于partition数量，那么有的消费者会消费多个partition。
+5. 如果消费者数量大于partition数量，那么有的消费者会闲置。
+### 8.2 rebalance
+1. 消费者调用poll方法从kafka拉取消息，这个方法也包含了心跳。
+2. 两次poll方法调用必须小于超时时间，否则，kafka认为消费者宕机，会触发一次rebalance。
+3. 发生rebalance是应该尽量避免的，不过它也是一种高可用的手段。
 
+### 8.3 创建消费者
+1. 设置属性
+```
+Properties props = new Properties();
+props.put("bootstrap.servers", "broker1:9092,broker2:9092");
+props.put("group.id", "CountryCounter");
+props.put("key.deserializer",
+"org.apache.kafka.common.serialization.StringDeserializer");
+props.put("value.deserializer",
+"org.apache.kafka.common.serialization.StringDeserializer");
+KafkaConsumer<String, String> consumer = new KafkaConsumer<String,
+String>(props);
+```
+2. 订阅主题
+` consumer.subscribe(Collections.singletonList("customerCountries")); `
+3. 拉取数据并处理
+```
+try {
+while (true) { 
+ConsumerRecords<String, String> records = consumer.poll(100); 
+for (ConsumerRecord<String, String> record : records) 
+{
+log.debug("topic = %s, partition = %s, offset = %d, customer = %s,
+country = %s\n",
+record.topic(), record.partition(), record.offset(),
+record.key(), record.value());
+int updatedCount = 1;
+if (custCountryMap.countainsValue(record.value())) {
+updatedCount = custCountryMap.get(record.value()) + 1;
+}
+custCountryMap.put(record.value(), updatedCount)
+JSONObject json = new JSONObject(custCountryMap);
+System.out.println(json.toString(4)) 
+}
+}
+} finally {
+consumer.close(); 
+}
+```
+4. 每个消费者都要使用独立的线程去消费数据
 
+### 8.4 消费者配置
+
+#### 8.4.1 fetch.min.bytes
+1. 消费者从服务器获取记录的最小字节数。
+2. broker在收到消费者的数据请求时，如果可用的数据量小于 fetch.min.bytes 指定的大小，那么它会等到有足够的可用数据时才把它返回给消费者。
+3. 把该属性的值设置得大一点可以降低broker的压力。
+4. 消费者如果拉不到消息，说明消息太少，此时消费者这边可以Thread.sleep一段时间再去拉取，当然sleep时间要小于超时时间。
+
+#### 8.4.2 fetch.max.wait.ms
+一句话，如果`fetch.max.wait.ms`被设为 100ms，并且 fetch.min.bytes 被设为 1MB，那么 Kafka 在收到消费者的请求后，要么返回1MB数据，要么在100ms后返回所有可用的数据，就看哪个条件先得到满足。
+#### 8.4.3 max.partition.fetch.bytes
+1. 该属性指定了服务器从每个分区里返回给消费者的最大字节数。
+2. 默认值是 1MB。
+3. 这个值是需要权衡的，太大就处理不完，导致消费者无法及时发起第二次轮询，这样两次轮询
+时间间隔很可能超时，会触发rebalance。
+
+#### 8.4.4 
 
 
 
