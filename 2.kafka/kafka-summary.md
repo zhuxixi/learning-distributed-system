@@ -1,4 +1,4 @@
-# 深入理解Kafka
+# 深入理解Kafka 0.9.0.1
 
 ## 0 基本概念
 ### 0.1 broker
@@ -715,7 +715,21 @@ count++;
 在另一个线程中调用consumer.wakeUp()方法，能够优雅退出循环。
 
 ## 9 深入kafka
+### 9.1 集群成员关系
+kafka使用zookeeper做集群管理，就是临时节点和watcher那一套，不多说了。
+### 9.2 控制器
+控制器其实就是一个 broker，只不过它除了具有一般 broker 的功能之外，还负责分区
+首领的选举。
+#### 使用zk实现的master选主
+1. 集群里第一个启动的broker在Zk里创建一个临时节点/controller让自己成为控制器。
+2. 其他broker在启动时也会尝试创建这个节点，不过会创建失败。
+3. 其他broker在/controller节点上做监听。
+4. 如果主节点挂了，从节点会收到通知再执行一遍步骤1。
+5. 每个新选出的控制器通过 Zookeeper 的条件递增操作获得一个全新的、数值更大的 controller epoch。
+6. 其他broker在知道当前controller epoch后，会忽略旧的epoch消息。
+7. epoch是递增的，所以能够避免脑裂问题。
 
+### 9.3 复制
 
 
 
