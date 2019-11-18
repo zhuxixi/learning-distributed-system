@@ -583,8 +583,138 @@ consumer.close();
 3. 这个值是需要权衡的，太大就处理不完，导致消费者无法及时发起第二次轮询，这样两次轮询
 时间间隔很可能超时，会触发rebalance。
 
-#### 8.4.4 
+#### 8.4.4 auto.offset.reset
+1. 该属性指定了消费者在读取一个没有偏移量的分区或者偏移量无效的情况下该作何处理。
+2. 它的默认值是 latest，消费者将从最新的记录开始读取数据。
+3. 另一个值是 earliest，消费者将从起始位置读取分区的记录。
 
+>个人认为如果做了幂等，erliest比较好。
+
+#### 8.4.5 enable.auto.commit
+1. 该属性指定了消费者是否自动提交偏移量，默认值是 true。
+2. 建议设为false，由自己控制何时提交偏移量。
+3. 如果设为true，还可以通过配置 auto.commit.interval.ms属性来控制提交的频率。
+
+#### 8.4.6 partition.assignment.strategy
+这个参数指定了分区策略
+1. org.apache.kafka.clients.consumer.RangeAssignor：该策略会把主题的若干个连续的分区分配给消费者。
+2. org.apache.kafka.clients.consumer.RoundRobinAssignor：该策略把主题的所有分区逐个分配给消费者。
+3. 也可以使用自定义类。
+
+> 针对一些核心的业务，可以将分区和消费都事先规划好。
+
+#### 8.4.7  client.id
+该属性可以是任意字符串，broker用它来标识从客户端发送过来的消息。
+
+#### 8.4.8 max.poll.records
+该属性用于控制单次调用 call() 方法能够返回的记录数量，可以帮你控制在轮询里需要处
+理的数据量。
+
+#### 8.4.9 receive.buffer.bytes 和 send.buffer.bytes
+和生产者的属性是一个意思。
+
+### 8.5 提交和偏移量
+更新分区已消费位置的操作叫作**提交**。
+#### 8.5.1 消费者如何提交偏移量
+消费者往一个叫作 _consumer_offset 的特殊主题发送消息，消息里包含每个分区的偏移量。
+#### 8.5.2 重复消费和消息丢失
+1. 如果消费者还没来得及提交偏移量就挂了，系统会触发一次rebalance，新消费者会
+从系统记录的偏移量继续消费，之前有一部分消息就被重复消费了。
+2. 如果消费者先提交偏移量再处理消息，此时消费者挂掉，系统触发rebalance后，新的
+消费者读取的偏移量跳过了之前的消息，那些消息就不会被处理了，也就是丢消息。
+#### 8.5.3 自动提交
+1. 如果enable.auto.commit被设为true，那么每过 5s，消费者会自动把从poll()方法接收到的最大偏移量提交上去。
+2. 提交时间间隔由auto.commit.interval.ms控制，默认值是 5s。
+3. 使用自动提交时，如果出现了rebalance，消息一定会被重复消费，无法避免，要做幂等！
+
+#### 8.5.4 同步提交
+1. auto.commit.offset 设为 false，让应用程序决定何时提交偏移量。
+2. 使用 commitSync()提交偏移量最简单也最可靠。
+3. 这个 API 会提交由 poll() 方法返回的最新偏移量，提交成功后马上返回，如果提交失败就抛出异常。
+
+>在一些核心业务场景中，使用手动提交是最稳妥的，因为核心业务一般吞吐量是第二考虑的，
+首先要考虑的问题是业务不能出错，在一些银行业务中，宁可整个服务宕机几小时，也不能
+让数据出错。
+#### 8.5.5 异步提交
+1. consumer.commitAsync()异步提交，不会阻塞消费者。
+>如果现在有两次异步提交，第一次异步提交offset2000失败，第二次异步提交3000成功，
+稍后第一个提交2000又成功了，此时如果触发了rebalance，会导致2000~3000这部分数据
+被重复消费。
+2. commitAsync支持回调。
+
+>我们可以使用一个单调递增的序列号来维护异步提交的顺序。在每次提交偏
+移量之后或在回调里提交偏移量时递增序列号。在进行重试前，先检查回调
+的序列号和即将提交的偏移量是否相等，如果相等，说明没有新的提交，那
+么可以安全地进行重试。如果序列号比较大，说明有一个新的提交已经发送
+出去了，应该停止重试。
+#### 8.5.6 同步和异步组合式提交
+```
+try {
+while (true) {
+ConsumerRecords<String, String> records = consumer.poll(100);
+for (ConsumerRecord<String, String> record : records) {
+System.out.println("topic = %s, partition = %s, offset = %d,
+customer = %s, country = %s\n",
+record.topic(), record.partition(),
+record.offset(), record.key(), record.value());
+}
+consumer.commitAsync(); ➊
+}
+} catch (Exception e) {
+log.error("Unexpected error", e);
+} finally {
+try {
+consumer.commitSync(); ➋
+} finally {
+consumer.close();
+}
+}
+➊	如果一切正常，我们使用 commitAsync() 方法来提交。这样速度更快，而且即使这次提
+交失败，下一次提交很可能会成功。
+➋	如果直接关闭消费者，就没有所谓的“下一次提交”了。使用 commitSync() 方法会一
+直重试，直到提交成功或发生无法恢复的错误。
+```
+
+#### 8.5.7 提交特定的offset值
+```
+private Map<TopicPartition, OffsetAndMetadata> currentOffsets =
+new HashMap<>(); ➊
+int count = 0;
+...
+while (true) {
+ConsumerRecords<String, String> records = consumer.poll(100);
+for (ConsumerRecord<String, String> record : records)
+{
+System.out.printf("topic = %s, partition = %s, offset = %d,
+customer = %s, country = %s\n",
+record.topic(), record.partition(), record.offset(),
+record.key(), record.value()); ➋
+currentOffsets.put(new TopicPartition(record.topic(),
+record.partition()), new
+OffsetAndMetadata(record.offset()+1, "no metadata")); ➌
+if (count % 1000 == 0) ➍
+consumer.commitAsync(currentOffsets,null); ➎
+count++;
+}
+}
+➊	用于跟踪偏移量的 map。
+➋	记住， printf 只是处理消息的临时方案。
+➌	在读取每条记录之后，使用期望处理的下一个消息的偏移量更新 map 里的偏移量。下
+一次就从这里开始读取消息。
+➍	我们决定每处理 1000 条记录就提交一次偏移量。在实际应用中，你可以根据时间或记
+录的内容进行提交。
+	这里调用的是 commitAsync()，不过调用 commitSync() 也是完全可以的。当然，在提交
+特定偏移量时，仍然要处理可能发生的错误。
+```
+#### 8.5.8 RebalanceListener
+创建消费者时可以传一个RebalanceListener的实现类，这样触发rebalance时你可以做一些
+处理。
+#### 8.5.9 从指定的offset开始处理记录
+使用seekTobegining方法。
+#### 8.5.10 退出消费者
+在另一个线程中调用consumer.wakeUp()方法，能够优雅退出循环。
+
+## 9 深入kafka
 
 
 
